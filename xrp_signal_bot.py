@@ -15,7 +15,7 @@ GMAIL_PASS   = os.environ["GMAIL_PASS"]
 NOTIFY_EMAIL = os.environ["NOTIFY_EMAIL"]   # jis email pe alert chahiye
 
 SYMBOL    = "XRPUSDT"
-INTERVAL  = "1h"          # 1-hour candles
+INTERVAL  = "60m"         # 1-hour candles (MEXC format)
 LIMIT     = 100           # last 100 candles for analysis
 
 # MEXC public API (no key needed for market data)
