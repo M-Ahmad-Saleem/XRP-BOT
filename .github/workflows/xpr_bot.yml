@@ -1,0 +1,35 @@
+name: XRP Signal Bot — 1H
+
+on:
+  schedule:
+    # Har ghante ke 5th minute pe run hoga (UTC)
+    # Taake MEXC ki 1H candle close ho jaye
+    - cron: "5 * * * *"
+
+  # Haath se bhi run kar sako
+  workflow_dispatch:
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install requests pandas numpy
+
+      - name: Run XRP Signal Bot
+        env:
+          GMAIL_USER:   ${{ secrets.GMAIL_USER }}
+          GMAIL_PASS:   ${{ secrets.GMAIL_PASS }}
+          NOTIFY_EMAIL: ${{ secrets.NOTIFY_EMAIL }}
+        run: python xrp_signal_bot.py
+        
