@@ -12,14 +12,13 @@ import numpy as np
 # ─────────────────────────────────────────
 GMAIL_USER   = os.environ["GMAIL_USER"]
 GMAIL_PASS   = os.environ["GMAIL_PASS"]
-NOTIFY_EMAIL = os.environ["NOTIFY_EMAIL"]   # jis email pe alert chahiye
+NOTIFY_EMAIL = os.environ["NOTIFY_EMAIL"]
 
-SYMBOL    = "XRPUSDT"
-INTERVAL  = "60m"         # 1-hour candles (MEXC format)
-LIMIT     = 100           # last 100 candles for analysis
+SYMBOL   = "XRPUSDT"
+INTERVAL = "60m"
+LIMIT    = 100
 
-# MEXC public API (no key needed for market data)
-BASE_URL  = "https://api.mexc.com/api/v3"
+BASE_URL = "https://api.mexc.com/api/v3"
 
 # ─────────────────────────────────────────
 # STEP 1 — MEXC se XRP candle data fetch
@@ -31,13 +30,17 @@ def fetch_candles():
     r.raise_for_status()
     raw = r.json()
 
-    df = pd.DataFrame(raw, columns=[
-        "open_time","open","high","low","close","volume",
-        "close_time","quote_volume","trades",
-        "taker_buy_base","taker_buy_quote","ignore"
-    ])
-    for col in ["open","high","low","close","volume"]:
-        df[col] = df[col].astype(float)
+    # MEXC column count varies by interval — handle both 8 and 12 col responses
+    num_cols = len(raw[0]) if raw else 0
+    print(f"   MEXC returned {num_cols} columns per candle")
+
+    # Always extract by position (safe regardless of column count)
+    df = pd.DataFrame(raw)
+    df = df.iloc[:, :6]  # take first 6 cols only: time,open,high,low,close,volume
+    df.columns = ["open_time", "open", "high", "low", "close", "volume"]
+
+    for col in ["open", "high", "low", "close", "volume"]:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
     df["open_time"] = pd.to_datetime(df["open_time"], unit="ms", utc=True)
     return df
 
@@ -59,27 +62,27 @@ def add_indicators(df):
     df["ema50"] = df["close"].ewm(span=50, adjust=False).mean()
 
     # MACD (12,26,9)
-    ema12       = df["close"].ewm(span=12, adjust=False).mean()
-    ema26       = df["close"].ewm(span=26, adjust=False).mean()
-    df["macd"]  = ema12 - ema26
-    df["signal"]= df["macd"].ewm(span=9, adjust=False).mean()
-    df["hist"]  = df["macd"] - df["signal"]
+    ema12        = df["close"].ewm(span=12, adjust=False).mean()
+    ema26        = df["close"].ewm(span=26, adjust=False).mean()
+    df["macd"]   = ema12 - ema26
+    df["signal"] = df["macd"].ewm(span=9, adjust=False).mean()
+    df["hist"]   = df["macd"] - df["signal"]
 
     # Bollinger Bands (20, 2σ)
-    sma20        = df["close"].rolling(20).mean()
-    std20        = df["close"].rolling(20).std()
-    df["bb_upper"]= sma20 + 2 * std20
-    df["bb_lower"]= sma20 - 2 * std20
-    df["bb_mid"]  = sma20
+    sma20         = df["close"].rolling(20).mean()
+    std20         = df["close"].rolling(20).std()
+    df["bb_upper"] = sma20 + 2 * std20
+    df["bb_lower"] = sma20 - 2 * std20
+    df["bb_mid"]   = sma20
 
-    # ATR (14) — volatility measure
-    hl   = df["high"] - df["low"]
-    hc   = (df["high"] - df["close"].shift()).abs()
-    lc   = (df["low"]  - df["close"].shift()).abs()
-    tr   = pd.concat([hl, hc, lc], axis=1).max(axis=1)
+    # ATR (14)
+    hl  = df["high"] - df["low"]
+    hc  = (df["high"] - df["close"].shift()).abs()
+    lc  = (df["low"]  - df["close"].shift()).abs()
+    tr  = pd.concat([hl, hc, lc], axis=1).max(axis=1)
     df["atr"] = tr.rolling(14).mean()
 
-    # Volume spike (2x average = notable)
+    # Volume spike
     df["vol_avg"]   = df["volume"].rolling(20).mean()
     df["vol_spike"] = df["volume"] > (df["vol_avg"] * 2)
 
@@ -93,9 +96,9 @@ def detect_signal(df):
     prev   = df.iloc[-2]
 
     signals = []
-    score   = 0   # +ve = LONG bias, -ve = SHORT bias
+    score   = 0
 
-    # ── LONG conditions ──
+    # LONG
     if latest["rsi"] < 35:
         signals.append("✅ RSI oversold (<35) — reversal zone")
         score += 2
@@ -115,7 +118,7 @@ def detect_signal(df):
         signals.append("✅ Volume spike on green candle — strong buying")
         score += 1
 
-    # ── SHORT conditions ──
+    # SHORT
     if latest["rsi"] > 70:
         signals.append("🔴 RSI overbought (>70) — reversal zone")
         score -= 2
@@ -135,7 +138,7 @@ def detect_signal(df):
         signals.append("🔴 Volume spike on red candle — strong selling")
         score -= 1
 
-    # ── Candle Pattern (Engulfing) ──
+    # Engulfing candle
     bull_engulf = (prev["close"] < prev["open"] and
                    latest["close"] > latest["open"] and
                    latest["open"]  < prev["close"] and
@@ -144,7 +147,6 @@ def detect_signal(df):
                    latest["close"] < latest["open"] and
                    latest["open"]  > prev["close"] and
                    latest["close"] < prev["open"])
-
     if bull_engulf:
         signals.append("✅ Bullish Engulfing candle pattern")
         score += 2
@@ -152,7 +154,7 @@ def detect_signal(df):
         signals.append("🔴 Bearish Engulfing candle pattern")
         score -= 2
 
-    # ── Decision ──
+    # Decision
     if score >= 4:
         direction  = "LONG  📈"
         order_type = "BUY"
@@ -166,11 +168,10 @@ def detect_signal(df):
         order_type = "WAIT"
         confidence = "LOW"
 
-    # ── Risk Management ──
     price  = latest["close"]
     atr    = latest["atr"]
-    sl_pct = round((atr / price) * 100, 2)        # stop loss = 1 ATR
-    tp_pct = round(sl_pct * 2, 2)                  # TP = 2:1 RR ratio
+    sl_pct = round((atr / price) * 100, 2)
+    tp_pct = round(sl_pct * 2, 2)
 
     if order_type == "BUY":
         stop_loss   = round(price - atr, 5)
@@ -201,7 +202,7 @@ def detect_signal(df):
         "bb_upper":    round(latest["bb_upper"], 5),
         "bb_lower":    round(latest["bb_lower"], 5),
         "candle_time": latest["open_time"].strftime("%Y-%m-%d %H:%M UTC"),
-        "vol_spike":   latest["vol_spike"],
+        "vol_spike":   bool(latest["vol_spike"]),
     }
 
 # ─────────────────────────────────────────
@@ -224,24 +225,19 @@ def send_email(sig):
         <tr><td><b>Risk:Reward</b></td><td>1 : 2 ✅</td></tr>
         """
 
-    color = {"LONG  📈": "#00c896", "SHORT 📉": "#ff4d6d", "NEUTRAL ⏸": "#888888"}
-    bar_color = color.get(direction, "#888888")
+    color_map = {"LONG  📈": "#00c896", "SHORT 📉": "#ff4d6d", "NEUTRAL ⏸": "#888888"}
+    bar_color = color_map.get(direction, "#888888")
 
     body = f"""
     <html><body style="font-family:monospace;background:#0d0d0d;color:#e0e0e0;padding:24px;">
     <div style="max-width:600px;margin:auto;border:1px solid #222;border-radius:8px;overflow:hidden;">
-
       <div style="background:{bar_color};padding:16px 24px;">
         <h2 style="margin:0;color:#000;">⚡ XRP/USDT FUTURES SIGNAL</h2>
         <p style="margin:4px 0 0;color:#000;font-size:13px;">MEXC Platform · 1H Timeframe · {sig['candle_time']}</p>
       </div>
-
       <div style="padding:24px;background:#111;">
-        <h3 style="color:{bar_color};font-size:22px;margin:0 0 4px;">
-          {direction}
-        </h3>
+        <h3 style="color:{bar_color};font-size:22px;margin:0 0 4px;">{direction}</h3>
         <p style="color:#aaa;margin:0 0 20px;">Confidence: <b style="color:#fff;">{confidence}</b> &nbsp;|&nbsp; Score: {sig['score']}/10</p>
-
         <table style="width:100%;border-collapse:collapse;font-size:14px;">
           <tr style="border-bottom:1px solid #222;">
             <td style="padding:8px 0;color:#aaa;width:140px;"><b>Entry Price</b></td>
@@ -269,30 +265,24 @@ def send_email(sig):
             <td style="color:#fff;">{'⚡ YES' if sig['vol_spike'] else 'No'}</td>
           </tr>
         </table>
-
         <div style="margin-top:20px;background:#1a1a1a;border-left:3px solid {bar_color};padding:12px 16px;border-radius:4px;">
           <p style="margin:0 0 8px;color:#aaa;font-size:12px;text-transform:uppercase;letter-spacing:1px;">Why this signal?</p>
-          <ul style="margin:0;padding-left:18px;color:#ddd;font-size:13px;line-height:1.8;">
-            {signals_html}
-          </ul>
+          <ul style="margin:0;padding-left:18px;color:#ddd;font-size:13px;line-height:1.8;">{signals_html}</ul>
         </div>
-
         <div style="margin-top:20px;background:#1a1a1a;border-radius:4px;padding:12px 16px;">
           <p style="margin:0;color:#aaa;font-size:12px;text-transform:uppercase;letter-spacing:1px;">⚙️ MEXC Futures Order Setup</p>
           <p style="margin:8px 0 0;color:#ddd;font-size:13px;line-height:1.8;">
             1. MEXC → Futures → <b>XRP/USDT</b><br>
-            2. Order Type: <b>Market Order</b> (fast entry)<br>
+            2. Order Type: <b>Market Order</b><br>
             3. Direction: <b>{order_type}</b><br>
-            4. Leverage: <b>5x–10x max</b> (risk management)<br>
-            5. Set SL: <b>{sig['stop_loss']} USDT</b><br>
-            6. Set TP: <b>{sig['take_profit']} USDT</b><br>
-            7. Use max <b>2–5% of portfolio</b> per trade
+            4. Leverage: <b>5x–10x max</b><br>
+            5. Stop Loss: <b>{sig['stop_loss']} USDT</b><br>
+            6. Take Profit: <b>{sig['take_profit']} USDT</b><br>
+            7. Max <b>2–5% of portfolio</b> per trade
           </p>
         </div>
-
         <p style="margin-top:20px;color:#555;font-size:11px;border-top:1px solid #222;padding-top:12px;">
-          ⚠️ Yeh bot technical analysis pe based hai. Koi bhi trade apne risk pe lo.
-          Past performance future results guarantee nahi karta. Always use Stop Loss.
+          ⚠️ Technical analysis based signal. Always use Stop Loss. Trade at your own risk.
         </p>
       </div>
     </div>
@@ -321,17 +311,13 @@ def main():
     sig = detect_signal(df)
 
     print(f"📊 Signal: {sig['direction']} | Score: {sig['score']} | Confidence: {sig['confidence']}")
-    print(f"   RSI: {sig['rsi']} | MACD: {sig['macd']}")
+    print(f"   RSI: {sig['rsi']} | MACD: {sig['macd']} | Price: {sig['price']}")
 
-    # Sirf HIGH ya MEDIUM confidence pe email bhejo
-    if sig["order_type"] != "WAIT":
-        if sig["confidence"] in ["HIGH", "MEDIUM"]:
-            print("📧 Sending email alert...")
-            send_email(sig)
-        else:
-            print("ℹ️  Signal weak — email nahi bheja (LOW confidence)")
+    if sig["order_type"] != "WAIT" and sig["confidence"] in ["HIGH", "MEDIUM"]:
+        print("📧 Sending email alert...")
+        send_email(sig)
     else:
-        print("⏸  Market neutral — koi signal nahi mila, wait karo.")
+        print("⏸  No strong signal — email nahi bheja.")
 
 if __name__ == "__main__":
     main()
